@@ -102,9 +102,19 @@ def create_sample_epub():
     
     # Write EPUB file
     output_path = 'test_files/sample_book.epub'
+    
+    # Ensure the output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     epub.write_epub(output_path, book, {})
     
-    print(f"Sample EPUB created: {output_path}")
+    # Verify the file was actually created
+    if os.path.exists(output_path):
+        print(f"Sample EPUB created: {output_path}")
+    else:
+        print(f"Error: Failed to create EPUB file at {output_path}")
+        return None
+    
     return output_path
 
 
