@@ -93,31 +93,79 @@ class EpubDistiller:
         
         return toc_entries
     
-    def extract_chapter_text(self, href: str) -> str:
+    def extract_chapter_text(self, href: str, debug: bool = False) -> str:
         """
         Extract chapter text while keeping HTML tags for navigation.
         """
         if not self.book:
             return ""
         
-        # Find the item by href
+        # Clean the href by removing fragments and normalizing
+        clean_href = href.split('#')[0]  # Remove fragment identifiers
+        
+        if debug:
+            print(f"\n[DEBUG] Looking for href: '{href}' (cleaned: '{clean_href}')")
+            print("[DEBUG] Available EPUB items:")
+            for item in self.book.get_items():
+                if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    print(f"  - {item.get_name()}")
+            print()
+        
+        # Find the item by href with improved matching
         for item in self.book.get_items():
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                # Check if this item matches the href
-                if item.get_name() == href or item.get_name().endswith(href):
-                    content = item.get_content().decode('utf-8')
-                    
-                    # Parse with BeautifulSoup to clean up and preserve structure
-                    soup = BeautifulSoup(content, 'html.parser')
-                    
-                    # Remove unnecessary elements but keep structure
-                    for element in soup.find_all(['script', 'style']):
-                        element.decompose()
-                    
-                    # Return the cleaned HTML content
-                    return str(soup)
+                item_name = item.get_name()
+                
+                # Try multiple matching strategies:
+                # 1. Exact match
+                if item_name == clean_href:
+                    if debug:
+                        print(f"[DEBUG] Match found (exact): '{item_name}' == '{clean_href}'")
+                    return self._extract_content_from_item(item)
+                
+                # 2. Item name ends with the href (for cases like "OEBPS/Text/chapter1.xhtml" vs "chapter1.xhtml")
+                if item_name.endswith(clean_href):
+                    if debug:
+                        print(f"[DEBUG] Match found (endswith): '{item_name}' ends with '{clean_href}'")
+                    return self._extract_content_from_item(item)
+                
+                # 3. href ends with item name (for cases where href has path prefix)
+                if clean_href.endswith(item_name):
+                    if debug:
+                        print(f"[DEBUG] Match found (reverse endswith): '{clean_href}' ends with '{item_name}'")
+                    return self._extract_content_from_item(item)
+                
+                # 4. Base filename match (extract just the filename from both)
+                import os
+                href_basename = os.path.basename(clean_href)
+                item_basename = os.path.basename(item_name)
+                if href_basename and item_basename and href_basename == item_basename:
+                    if debug:
+                        print(f"[DEBUG] Match found (basename): '{href_basename}' == '{item_basename}'")
+                    return self._extract_content_from_item(item)
         
+        if debug:
+            print(f"[DEBUG] No match found for href: '{href}'")
         return ""
+    
+    def _extract_content_from_item(self, item) -> str:
+        """
+        Helper method to extract and clean content from an EPUB item.
+        """
+        try:
+            content = item.get_content().decode('utf-8')
+            
+            # Parse with BeautifulSoup to clean up and preserve structure
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Remove unnecessary elements but keep structure
+            for element in soup.find_all(['script', 'style']):
+                element.decompose()
+            
+            # Return the cleaned HTML content
+            return str(soup)
+        except Exception:
+            return ""
     
     def html_to_plain_text(self, html_content: str) -> str:
         """
@@ -183,7 +231,7 @@ class EpubDistiller:
         
         return self.chapter_mapping
     
-    def print_chapter_info(self, include_summary: bool = False):
+    def print_chapter_info(self, include_summary: bool = False, verbose: bool = False):
         """Print chapter numbers and names, optionally with summaries."""
         toc_entries = self.extract_table_of_contents()
         
@@ -198,7 +246,7 @@ class EpubDistiller:
             
             if include_summary:
                 # Extract and summarize chapter content
-                html_content = self.extract_chapter_text(href)
+                html_content = self.extract_chapter_text(href, debug=verbose)
                 if html_content:
                     plain_text = self.html_to_plain_text(html_content)
                     summary_sentences = self.summarize_text(plain_text)
@@ -211,7 +259,7 @@ class EpubDistiller:
             
             print()
     
-    def distill(self, include_summary: bool = False):
+    def distill(self, include_summary: bool = False, verbose: bool = False):
         """Main extraction process."""
         if not self.load_book():
             return False
@@ -225,7 +273,7 @@ class EpubDistiller:
         self.build_chapter_mapping()
         
         # Print chapter information
-        self.print_chapter_info(include_summary)
+        self.print_chapter_info(include_summary, verbose)
         
         print(f"\nTotal chapters extracted: {len(self.chapter_mapping)}")
         
@@ -275,7 +323,7 @@ def main():
     distiller = EpubDistiller(str(epub_path))
     
     try:
-        success = distiller.distill(include_summary=args.summary)
+        success = distiller.distill(include_summary=args.summary, verbose=args.verbose)
         return 0 if success else 1
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.", file=sys.stderr)
