@@ -279,6 +279,7 @@ class EpubDistiller:
     def html_to_plain_text(self, html_content: str) -> str:
         """
         Convert HTML content to plain text for summarization.
+        Enhanced to better handle educational content structure.
         """
         soup = BeautifulSoup(html_content, 'html.parser')
         
@@ -286,24 +287,236 @@ class EpubDistiller:
         for element in soup.find_all(['script', 'style', 'meta', 'link']):
             element.decompose()
         
-        # Get text with spaces between elements
-        text = soup.get_text(separator=' ', strip=True)
+        # Extract text content while preserving paragraph structure
+        text_parts = []
         
-        # Clean up extra whitespace
-        text = ' '.join(text.split())
+        # Process body content, skipping main title
+        body = soup.find('body') or soup
+        skip_first_h1 = True
+        
+        for element in body.descendants:
+            if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                # Skip the first h1 (main title) but include section headers
+                if element.name == 'h1' and skip_first_h1:
+                    skip_first_h1 = False
+                    continue
+                text_parts.append(f"\n\n{element.get_text(strip=True)}\n")
+            elif element.name == 'p':
+                para_text = element.get_text(strip=True)
+                if para_text:
+                    text_parts.append(f"{para_text}\n\n")
+            elif element.name in ['div', 'section'] and element.get_text(strip=True):
+                # Only add if it's not just containing other elements
+                direct_text = ''.join([str(x) for x in element.contents if isinstance(x, str)]).strip()
+                if direct_text:
+                    text_parts.append(f"{direct_text}\n\n")
+        
+        # If no structured content found, fall back to simple extraction
+        if not text_parts:
+            text_parts.append(soup.get_text(separator=' ', strip=True))
+        
+        # Join and clean up
+        text = ''.join(text_parts)
+        
+        # Clean up extra whitespace and normalize
+        import re
+        text = re.sub(r'\n\s*\n+', '\n\n', text)  # Normalize paragraph breaks
+        text = re.sub(r' +', ' ', text)  # Remove extra spaces
+        text = text.strip()
         
         return text
     
+    def _score_sentence_importance(self, sentence: str, position: int, total_sentences: int, paragraph_first: bool = False) -> float:
+        """
+        Score sentence importance for educational content.
+        Higher scores indicate more important sentences for summarization.
+        """
+        score = 0.0
+        sentence_lower = sentence.lower().strip()
+        
+        # Skip very short sentences
+        if len(sentence_lower) < 20:
+            return 0.0
+        
+        # Position-based scoring (first and second sentences are often important)
+        if position == 0:
+            score += 3.0  # First sentence often contains main topic
+        elif position == 1:
+            score += 2.0  # Second sentence often expands on topic
+        elif position < 3:
+            score += 1.0
+        
+        # Paragraph-first sentences are important
+        if paragraph_first:
+            score += 2.0
+        
+        # Educational keyword scoring - definitions and concepts
+        definition_patterns = [
+            r'\bis a\b', r'\bare\b.*\bthat\b', r'\brefers to\b', r'\bdefined as\b', 
+            r'\bmeans\b', r'\binvolves\b', r'\benables\b', r'\ballows\b'
+        ]
+        
+        concept_keywords = [
+            'concept', 'principle', 'fundamental', 'basic', 'essential',
+            'important', 'key', 'main', 'primary', 'core', 'crucial'
+        ]
+        
+        introduction_keywords = [
+            'introduction', 'overview', 'fundamentals', 'basics',
+            'understanding', 'approach', 'method', 'technique'
+        ]
+        
+        benefit_keywords = [
+            'benefits', 'advantages', 'purpose', 'goal', 'objective',
+            'helps', 'provides', 'offers', 'improves', 'enhances'
+        ]
+        
+        # Score for definition patterns (high value)
+        import re
+        for pattern in definition_patterns:
+            if re.search(pattern, sentence_lower):
+                score += 3.0
+                break
+        
+        # Score for concept keywords
+        for keyword in concept_keywords:
+            if keyword in sentence_lower:
+                score += 2.0
+                break
+        
+        # Score for introduction keywords
+        for keyword in introduction_keywords:
+            if keyword in sentence_lower:
+                score += 1.5
+        
+        # Score for benefit keywords
+        for keyword in benefit_keywords:
+            if keyword in sentence_lower:
+                score += 1.0
+        
+        # Penalize very technical implementation details
+        technical_penalties = [
+            'syntax', 'parameter', 'variable', 'function', 'method',
+            'implementation', 'code', 'example', 'instance'
+        ]
+        
+        penalty_count = 0
+        for penalty in technical_penalties:
+            if penalty in sentence_lower:
+                penalty_count += 1
+        
+        score -= penalty_count * 0.5
+        
+        # Penalize sentences with too many technical terms or symbols
+        if len(re.findall(r'[(){}[\]]', sentence)) > 2:
+            score -= 1.0
+        
+        # Sentence length scoring (moderate length preferred for readability)
+        words = len(sentence.split())
+        if 15 <= words <= 30:
+            score += 1.0
+        elif 10 <= words <= 35:
+            score += 0.5
+        elif words < 8 or words > 45:
+            score -= 1.0
+        
+        # Boost sentences that explain "what" something is
+        if re.search(r'\bwhat\b.*\bis\b', sentence_lower) or re.search(r'\b(this|that|these|those)\b.*\b(is|are)\b', sentence_lower):
+            score += 1.5
+        
+        # Boost sentences that explain processes or workflows
+        if any(word in sentence_lower for word in ['process', 'step', 'method', 'approach', 'way', 'how']):
+            score += 0.5
+        
+        return max(0.0, score)
+    
+    def _extract_educational_summary(self, text: str, sentences_count: int = 2) -> List[str]:
+        """
+        Extract educationally relevant sentences using custom scoring.
+        """
+        import re
+        
+        # Split into paragraphs
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        
+        scored_sentences = []
+        
+        for para in paragraphs:
+            # Check if this paragraph starts with a heading (short line followed by longer content)
+            lines = para.split('\n')
+            if len(lines) >= 2 and len(lines[0]) < 50 and len(lines[1]) > 50:
+                # This is a section with heading, use content after the heading
+                content = '\n'.join(lines[1:])
+            else:
+                content = para
+            
+            # Split content into sentences
+            sentences = re.split(r'[.!?]+', content)
+            sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 15]
+            
+            for i, sentence in enumerate(sentences):
+                # Check if this is the first sentence of a paragraph/section
+                paragraph_first = (i == 0)
+                
+                # Score the sentence
+                score = self._score_sentence_importance(
+                    sentence, i, len(sentences), paragraph_first
+                )
+                
+                if score > 0:
+                    # Clean sentence and ensure it ends with period
+                    clean_sentence = sentence.strip()
+                    if not clean_sentence.endswith('.'):
+                        clean_sentence += '.'
+                    scored_sentences.append((clean_sentence, score))
+        
+        # Sort by score (descending) and take top sentences
+        scored_sentences.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top sentences, maintaining some order preference
+        selected = scored_sentences[:min(sentences_count * 2, len(scored_sentences))]
+        
+        # If we have too many, prefer those that appear earlier in text
+        if len(selected) > sentences_count:
+            # Sort by position in original text to maintain flow
+            original_order = []
+            for sentence, score in selected:
+                # Find position in original text (approximately)
+                pos = text.find(sentence.rstrip('.'))
+                if pos >= 0:
+                    original_order.append((sentence, score, pos))
+                else:
+                    # If not found exactly, try finding a portion
+                    words = sentence.split()[:5]  # First 5 words
+                    search_phrase = ' '.join(words)
+                    pos = text.find(search_phrase)
+                    if pos >= 0:
+                        original_order.append((sentence, score, pos))
+            
+            original_order.sort(key=lambda x: x[2])  # Sort by position
+            selected = [(s, sc) for s, sc, pos in original_order[:sentences_count]]
+        
+        return [sentence for sentence, score in selected]
+
     def summarize_text(self, text: str, sentences_count: int = 2) -> List[str]:
         """
-        Summarize text using Sumy library.
-        Returns a list of summary sentences.
+        Summarize text using improved educational-focused approach.
+        Returns a list of summary sentences prioritizing key concepts and definitions.
         """
-        if not SUMY_AVAILABLE:
-            return ["Summarization not available. Install required dependencies: pip install sumy nltk numpy"]
-        
         if not text or len(text.strip()) < 100:
             return ["Chapter too short for meaningful summarization."]
+        
+        # Try custom educational summarization first
+        try:
+            educational_summary = self._extract_educational_summary(text, sentences_count)
+            if educational_summary:
+                return educational_summary
+        except Exception:
+            pass  # Fall back to LSA if custom approach fails
+        
+        # Fallback to LSA summarization if available
+        if not SUMY_AVAILABLE:
+            return ["Summarization not available. Install required dependencies: pip install sumy nltk numpy"]
         
         try:
             # Initialize NLTK data if not already done
@@ -316,7 +529,7 @@ class EpubDistiller:
             # Parse the text
             parser = PlaintextParser.from_string(text, Tokenizer("english"))
             
-            # Use LSA summarizer (works well for most content)
+            # Use LSA summarizer as fallback
             summarizer = LsaSummarizer()
             
             # Get summary
