@@ -5,6 +5,7 @@ CLI tool to extract metadata, table of contents, and chapter text from EPUB file
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -24,17 +25,76 @@ except ImportError:
     SUMY_AVAILABLE = False
 
 
+def validate_and_get_permission(epub_path: Path, interactive: bool = True) -> bool:
+    """
+    Validate the EPUB path and get user permission if needed.
+    
+    Args:
+        epub_path: Path to the EPUB file
+        interactive: Whether to prompt user for permission (False for testing)
+    
+    Returns:
+        bool: True if path is allowed, False if access should be denied
+    """
+    # Convert to absolute path and resolve any symlinks
+    try:
+        canonical_path = epub_path.resolve()
+    except (OSError, RuntimeError) as e:
+        print(f"Error resolving path: {e}", file=sys.stderr)
+        return False
+    
+    # Get current working directory
+    current_dir = Path.cwd().resolve()
+    
+    # Check if the file is outside the current working directory
+    try:
+        canonical_path.relative_to(current_dir)
+        # File is within current directory or subdirectory
+        return True
+    except ValueError:
+        # File is outside current directory
+        if not interactive:
+            return True  # Allow in non-interactive mode (for testing)
+        
+        print(f"\n⚠️  Security Notice:")
+        print(f"You are trying to access a file outside the current directory:")
+        print(f"  Current directory: {current_dir}")
+        print(f"  Target file: {canonical_path}")
+        print()
+        
+        # Check if it's on a different drive (Windows)
+        if os.name == 'nt':  # Windows
+            if canonical_path.anchor != current_dir.anchor:
+                print(f"⚠️  The file is on a different drive ({canonical_path.anchor} vs {current_dir.anchor})")
+                print()
+        
+        response = input("Do you want to continue? [y/N]: ").strip().lower()
+        return response in ('y', 'yes')
+
+
 class EpubDistiller:
     """Extract and organize content from EPUB files."""
     
-    def __init__(self, epub_path: str):
-        """Initialize with path to EPUB file."""
+    def __init__(self, epub_path: str, interactive: bool = True):
+        """
+        Initialize with path to EPUB file.
+        
+        Args:
+            epub_path: Path to the EPUB file
+            interactive: Whether to prompt for permissions (False for testing)
+        """
         self.epub_path = Path(epub_path)
+        self.interactive = interactive
         self.book = None
         self.chapter_mapping: Dict[str, str] = {}
         
     def load_book(self) -> bool:
-        """Load the EPUB file."""
+        """Load the EPUB file after validating permissions."""
+        # Validate path and get permission if needed
+        if not validate_and_get_permission(self.epub_path, self.interactive):
+            print("Access denied by user.", file=sys.stderr)
+            return False
+        
         try:
             self.book = epub.read_epub(str(self.epub_path))
             return True
@@ -605,12 +665,12 @@ class EpubDistiller:
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Extract content from EPUB files",
+        description="Extract content from EPUB files (supports both relative and absolute paths)",
         prog="distill"
     )
     parser.add_argument(
         "epub_file",
-        help="Path to the EPUB file to process"
+        help="Path to the EPUB file to process (relative or absolute path)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -622,13 +682,23 @@ def main():
         action="store_true",
         help="Include chapter summaries in the output"
     )
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Disable permission prompts (automatically allow all paths)"
+    )
     
     args = parser.parse_args()
     
     # Check if file exists
     epub_path = Path(args.epub_file)
     if not epub_path.exists():
-        print(f"Error: File '{epub_path}' does not exist.", file=sys.stderr)
+        # Provide more detailed error message
+        try:
+            canonical_path = epub_path.resolve()
+            print(f"Error: File '{canonical_path}' does not exist.", file=sys.stderr)
+        except (OSError, RuntimeError):
+            print(f"Error: File '{epub_path}' does not exist or path is invalid.", file=sys.stderr)
         return 1
     
     if not epub_path.suffix.lower() in ['.epub']:
@@ -642,7 +712,8 @@ def main():
         return 1
     
     # Process the EPUB file
-    distiller = EpubDistiller(str(epub_path))
+    interactive = not args.no_interactive
+    distiller = EpubDistiller(str(epub_path), interactive=interactive)
     
     try:
         success = distiller.distill(include_summary=args.summary, verbose=args.verbose)

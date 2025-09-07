@@ -24,8 +24,8 @@ def test_distill_functionality():
     print("Testing EpubDistiller functionality...")
     print("="*50)
     
-    # Initialize distiller
-    distiller = EpubDistiller(epub_path)
+    # Initialize distiller (non-interactive mode for testing)
+    distiller = EpubDistiller(epub_path, interactive=False)
     
     # Test loading
     if not distiller.load_book():
