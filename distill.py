@@ -96,15 +96,20 @@ class EpubDistiller:
     def extract_chapter_text(self, href: str, debug: bool = False) -> str:
         """
         Extract chapter text while keeping HTML tags for navigation.
+        Now handles fragment identifiers to extract specific sections.
         """
         if not self.book:
             return ""
         
-        # Clean the href by removing fragments and normalizing
-        clean_href = href.split('#')[0]  # Remove fragment identifiers
+        # Parse href to separate file and fragment
+        if '#' in href:
+            clean_href, fragment = href.split('#', 1)
+        else:
+            clean_href, fragment = href, None
         
         if debug:
-            print(f"\n[DEBUG] Looking for href: '{href}' (cleaned: '{clean_href}')")
+            print(f"\n[DEBUG] Looking for href: '{href}'")
+            print(f"[DEBUG] Clean href: '{clean_href}', Fragment: '{fragment}'")
             print("[DEBUG] Available EPUB items:")
             for item in self.book.get_items():
                 if item.get_type() == ebooklib.ITEM_DOCUMENT:
@@ -121,19 +126,19 @@ class EpubDistiller:
                 if item_name == clean_href:
                     if debug:
                         print(f"[DEBUG] Match found (exact): '{item_name}' == '{clean_href}'")
-                    return self._extract_content_from_item(item)
+                    return self._extract_content_from_item(item, fragment, debug)
                 
                 # 2. Item name ends with the href (for cases like "OEBPS/Text/chapter1.xhtml" vs "chapter1.xhtml")
                 if item_name.endswith(clean_href):
                     if debug:
                         print(f"[DEBUG] Match found (endswith): '{item_name}' ends with '{clean_href}'")
-                    return self._extract_content_from_item(item)
+                    return self._extract_content_from_item(item, fragment, debug)
                 
                 # 3. href ends with item name (for cases where href has path prefix)
                 if clean_href.endswith(item_name):
                     if debug:
                         print(f"[DEBUG] Match found (reverse endswith): '{clean_href}' ends with '{item_name}'")
-                    return self._extract_content_from_item(item)
+                    return self._extract_content_from_item(item, fragment, debug)
                 
                 # 4. Base filename match (extract just the filename from both)
                 import os
@@ -142,15 +147,16 @@ class EpubDistiller:
                 if href_basename and item_basename and href_basename == item_basename:
                     if debug:
                         print(f"[DEBUG] Match found (basename): '{href_basename}' == '{item_basename}'")
-                    return self._extract_content_from_item(item)
+                    return self._extract_content_from_item(item, fragment, debug)
         
         if debug:
             print(f"[DEBUG] No match found for href: '{href}'")
         return ""
     
-    def _extract_content_from_item(self, item) -> str:
+    def _extract_content_from_item(self, item, fragment: str = None, debug: bool = False) -> str:
         """
         Helper method to extract and clean content from an EPUB item.
+        If fragment is provided, try to extract only that specific section.
         """
         try:
             content = item.get_content().decode('utf-8')
@@ -162,10 +168,113 @@ class EpubDistiller:
             for element in soup.find_all(['script', 'style']):
                 element.decompose()
             
-            # Return the cleaned HTML content
+            # If we have a fragment identifier, try to extract specific content
+            if fragment:
+                if debug:
+                    print(f"[DEBUG] Trying to extract fragment: '{fragment}'")
+                
+                # Look for element with matching id
+                target_element = soup.find(id=fragment)
+                if target_element:
+                    if debug:
+                        print(f"[DEBUG] Found element with id='{fragment}'")
+                    
+                    # Try to get meaningful content around the target
+                    # Strategy 1: If it's a heading, get content until the next heading of same level
+                    if target_element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                        return self._extract_section_content(target_element, debug)
+                    
+                    # Strategy 2: If it's a container (div, section, etc), get its content
+                    elif target_element.name in ['div', 'section', 'article', 'main']:
+                        return str(target_element)
+                    
+                    # Strategy 3: Get the element and some following content
+                    else:
+                        return self._extract_surrounding_content(target_element, debug)
+                
+                else:
+                    if debug:
+                        print(f"[DEBUG] No element found with id='{fragment}', using full content")
+            
+            # Return the full cleaned HTML content if no fragment or fragment not found
             return str(soup)
-        except Exception:
+        except Exception as e:
+            if debug:
+                print(f"[DEBUG] Error extracting content: {e}")
             return ""
+    
+    def _extract_section_content(self, heading_element, debug: bool = False) -> str:
+        """
+        Extract content from a heading until the next heading of the same or higher level.
+        """
+        try:
+            # Determine the heading level
+            heading_level = int(heading_element.name[1])  # h1 -> 1, h2 -> 2, etc.
+            
+            if debug:
+                print(f"[DEBUG] Extracting section content from {heading_element.name} (level {heading_level})")
+            
+            # Collect all elements from this heading until the next heading of same/higher level
+            section_elements = [heading_element]
+            current = heading_element.next_sibling
+            
+            while current:
+                # If it's a heading of same or higher level, stop
+                if current.name and current.name.startswith('h'):
+                    try:
+                        current_level = int(current.name[1])
+                        if current_level <= heading_level:
+                            break
+                    except (ValueError, IndexError):
+                        pass
+                
+                # Add non-empty elements
+                if current.name or (hasattr(current, 'strip') and current.strip()):
+                    section_elements.append(current)
+                
+                current = current.next_sibling
+            
+            # Create a new soup with just the section content
+            section_soup = BeautifulSoup('', 'html.parser')
+            for element in section_elements:
+                if hasattr(element, 'extract'):
+                    # Clone the element to avoid modifying the original
+                    element_copy = BeautifulSoup(str(element), 'html.parser')
+                    section_soup.append(element_copy)
+                elif hasattr(element, 'strip') and element.strip():
+                    section_soup.append(element)
+            
+            result = str(section_soup)
+            
+            if debug:
+                print(f"[DEBUG] Extracted section content ({len(result)} chars)")
+            
+            return result
+            
+        except Exception as e:
+            if debug:
+                print(f"[DEBUG] Error in section extraction: {e}")
+            return str(heading_element)
+    
+    def _extract_surrounding_content(self, target_element, debug: bool = False) -> str:
+        """
+        Extract the target element and some surrounding content.
+        """
+        try:
+            # Get the parent container if available
+            parent = target_element.parent
+            if parent and parent.name in ['div', 'section', 'article', 'main', 'body']:
+                if debug:
+                    print(f"[DEBUG] Using parent container: {parent.name}")
+                return str(parent)
+            else:
+                if debug:
+                    print(f"[DEBUG] Using target element: {target_element.name}")
+                return str(target_element)
+        except Exception as e:
+            if debug:
+                print(f"[DEBUG] Error in surrounding content extraction: {e}")
+            return str(target_element)
     
     def html_to_plain_text(self, html_content: str) -> str:
         """
