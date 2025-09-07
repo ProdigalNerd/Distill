@@ -1,2 +1,5 @@
 ebooklib>=0.18
 beautifulsoup4>=4.11.0
+sumy>=0.11.0
+numpy>=1.21.0
+nltk>=3.6

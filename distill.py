@@ -13,6 +13,16 @@ import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
+# Summarization imports (optional, only used when --summary flag is provided)
+try:
+    from sumy.parsers.plaintext import PlaintextParser
+    from sumy.nlp.tokenizers import Tokenizer
+    from sumy.summarizers.lsa import LsaSummarizer
+    import nltk
+    SUMY_AVAILABLE = True
+except ImportError:
+    SUMY_AVAILABLE = False
+
 
 class EpubDistiller:
     """Extract and organize content from EPUB files."""
@@ -109,6 +119,58 @@ class EpubDistiller:
         
         return ""
     
+    def html_to_plain_text(self, html_content: str) -> str:
+        """
+        Convert HTML content to plain text for summarization.
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Remove script and style elements
+        for element in soup.find_all(['script', 'style', 'meta', 'link']):
+            element.decompose()
+        
+        # Get text with spaces between elements
+        text = soup.get_text(separator=' ', strip=True)
+        
+        # Clean up extra whitespace
+        text = ' '.join(text.split())
+        
+        return text
+    
+    def summarize_text(self, text: str, sentences_count: int = 2) -> List[str]:
+        """
+        Summarize text using Sumy library.
+        Returns a list of summary sentences.
+        """
+        if not SUMY_AVAILABLE:
+            return ["Summarization not available. Install required dependencies: pip install sumy nltk numpy"]
+        
+        if not text or len(text.strip()) < 100:
+            return ["Chapter too short for meaningful summarization."]
+        
+        try:
+            # Initialize NLTK data if not already done
+            try:
+                nltk.data.find('tokenizers/punkt')
+            except LookupError:
+                nltk.download('punkt', quiet=True)
+                nltk.download('punkt_tab', quiet=True)
+            
+            # Parse the text
+            parser = PlaintextParser.from_string(text, Tokenizer("english"))
+            
+            # Use LSA summarizer (works well for most content)
+            summarizer = LsaSummarizer()
+            
+            # Get summary
+            summary = summarizer(parser.document, sentences_count)
+            
+            # Convert to list of strings
+            return [str(sentence) for sentence in summary]
+            
+        except Exception as e:
+            return [f"Summarization error: {str(e)}"]
+    
     def build_chapter_mapping(self) -> Dict[str, str]:
         """
         Build mapping: chapter_id → text content.
@@ -121,8 +183,8 @@ class EpubDistiller:
         
         return self.chapter_mapping
     
-    def print_chapter_info(self):
-        """Print chapter numbers and names."""
+    def print_chapter_info(self, include_summary: bool = False):
+        """Print chapter numbers and names, optionally with summaries."""
         toc_entries = self.extract_table_of_contents()
         
         print("\n" + "="*60)
@@ -133,9 +195,23 @@ class EpubDistiller:
             print(f"{i:3d}. {title}")
             print(f"     ID: {chapter_id}")
             print(f"     File: {href}")
+            
+            if include_summary:
+                # Extract and summarize chapter content
+                html_content = self.extract_chapter_text(href)
+                if html_content:
+                    plain_text = self.html_to_plain_text(html_content)
+                    summary_sentences = self.summarize_text(plain_text)
+                    
+                    print(f"     Summary:")
+                    for sentence in summary_sentences:
+                        print(f"       • {sentence}")
+                else:
+                    print(f"     Summary: [Could not extract content]")
+            
             print()
     
-    def distill(self):
+    def distill(self, include_summary: bool = False):
         """Main extraction process."""
         if not self.load_book():
             return False
@@ -149,7 +225,7 @@ class EpubDistiller:
         self.build_chapter_mapping()
         
         # Print chapter information
-        self.print_chapter_info()
+        self.print_chapter_info(include_summary)
         
         print(f"\nTotal chapters extracted: {len(self.chapter_mapping)}")
         
@@ -171,6 +247,11 @@ def main():
         action="store_true",
         help="Enable verbose output"
     )
+    parser.add_argument(
+        "--summary", "-s",
+        action="store_true",
+        help="Include chapter summaries in the output"
+    )
     
     args = parser.parse_args()
     
@@ -184,11 +265,17 @@ def main():
         print(f"Error: File '{epub_path}' is not an EPUB file.", file=sys.stderr)
         return 1
     
+    # Check if summarization is requested but dependencies are missing
+    if args.summary and not SUMY_AVAILABLE:
+        print("Error: Summarization requested but required dependencies are not installed.", file=sys.stderr)
+        print("Please install with: pip install sumy nltk numpy", file=sys.stderr)
+        return 1
+    
     # Process the EPUB file
     distiller = EpubDistiller(str(epub_path))
     
     try:
-        success = distiller.distill()
+        success = distiller.distill(include_summary=args.summary)
         return 0 if success else 1
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.", file=sys.stderr)

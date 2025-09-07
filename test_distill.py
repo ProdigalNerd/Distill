@@ -9,7 +9,7 @@ from pathlib import Path
 # Add the current directory to the path so we can import distill
 sys.path.insert(0, str(Path(__file__).parent))
 
-from distill import EpubDistiller
+from distill import EpubDistiller, SUMY_AVAILABLE
 
 
 def test_distill_functionality():
@@ -67,6 +67,25 @@ def test_distill_functionality():
     
     for chapter_id, content in chapter_mapping.items():
         print(f"   {chapter_id}: {len(content)} characters")
+    
+    # Test summarization functionality if available
+    if SUMY_AVAILABLE:
+        print("\n" + "="*50)
+        print("Testing summarization functionality...")
+        
+        for chapter_id, chapter_title, href in toc_entries:
+            html_content = distiller.extract_chapter_text(href)
+            if html_content:
+                plain_text = distiller.html_to_plain_text(html_content)
+                summary = distiller.summarize_text(plain_text)
+                
+                print(f"✅ Generated summary for '{chapter_title}' ({len(summary)} sentences)")
+                for i, sentence in enumerate(summary, 1):
+                    print(f"   {i}. {sentence[:60]}..." if len(sentence) > 60 else f"   {i}. {sentence}")
+            else:
+                print(f"❌ Could not extract content for '{chapter_title}'")
+    else:
+        print("\n⚠️  Sumy not available, skipping summarization tests")
     
     print("\n✅ All tests passed!")
     return True
